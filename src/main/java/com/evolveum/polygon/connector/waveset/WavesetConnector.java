@@ -55,6 +55,19 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
     private static final String ATTR_PASSWORD = "password"; //password
 //    private static final String ATTR_lOCK_EXPIRY = "lockExpiry"; //Lock-out Expiration
 
+    public static final String ORGANIZATION_NAME = "Organization";
+    // organization attributes: UID, NAME and:
+    private static final String ATTR_ORG_PARENT_NAME = "parentName";
+    private static final String ATTR_ORG_PARENT_ID = "parentId";
+    private static final String ATTR_ORG_DISPLAY_NAME = "displayName"; // as __NAME__
+    private static final String ATTR_ORG_ID = "id"; //__UID__
+    // only for converting
+    private static final String ATTR_ORG_MEMBER_OBJECT_GROUP = "MemberObjectGroups";
+
+    private static final String ORG_OBJECT_CLASS_READ = "orgread";
+    private static final String ORG_OBJECT_CLASS_WRITE = "orgwrite";
+    private static final String ORG_OBJECT_CLASS_DELETE = "orgdelete";
+
 
     @Override
     public Configuration getConfiguration() {
@@ -113,7 +126,7 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
         SchemaBuilder builder = new SchemaBuilder(WavesetConnector.class);
 
         builder.defineObjectClass(schemaAccount());
-//        builder.defineObjectClass(schemaOrganization());
+        builder.defineObjectClass(schemaOrganization());
 
         return builder.build();
     }
@@ -126,7 +139,7 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
         objClassBuilder.addAttributeInfo(uidAib.build());
 
         AttributeInfoBuilder nameAib = new AttributeInfoBuilder(Name.NAME);
-        nameAib.setRequired(true);
+        nameAib.setRequired(false);
         objClassBuilder.addAttributeInfo(nameAib.build());
 
         for (String att : configuration.getAttributeNames()) {
@@ -153,6 +166,25 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
         return objClassBuilder.build();
     }
 
+    private ObjectClassInfo schemaOrganization() {
+        ObjectClassInfoBuilder objClassBuilder = new ObjectClassInfoBuilder();
+        objClassBuilder.setType(ORGANIZATION_NAME);
+
+        AttributeInfoBuilder uidAib = new AttributeInfoBuilder(Uid.NAME);
+        uidAib.setRequired(true);
+        objClassBuilder.addAttributeInfo(uidAib.build());
+
+        AttributeInfoBuilder nameAib = new AttributeInfoBuilder(Name.NAME);
+        nameAib.setRequired(false);
+        objClassBuilder.addAttributeInfo(nameAib.build());
+
+
+        objClassBuilder.addAttributeInfo(new AttributeInfoBuilder(ATTR_ORG_PARENT_NAME).build());
+        objClassBuilder.addAttributeInfo(new AttributeInfoBuilder(ATTR_ORG_PARENT_ID).build());
+
+        return objClassBuilder.build();
+    }
+
     @Override
     public FilterTranslator<WavesetFilter> createFilterTranslator(ObjectClass objectClass, OperationOptions operationOptions) {
         return new WavesetFilterTranslator();
@@ -163,10 +195,10 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
         if (objectClass.is(ObjectClass.ACCOUNT_NAME)) {
             try {
                 LOG.ok("executeQuery: {0}, options: {1}", query, operationOptions);
-                // find by accountId
-                if (query != null && query.byAccountId != null) {
+                // find by accountId (name)
+                if (query != null && query.byName != null) {
 
-                    List results = findAccount(query.byAccountId, true);
+                    List results = findAccount(query.byName, true);
 
                     if (results != null && results.size() > 0) {
                         for (Object result : results) {
@@ -211,9 +243,106 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
             } catch (SpmlException e) {
                 throw new ConnectorIOException(e.getMessage(), e);
             }
+        } else if (objectClass.is(ORGANIZATION_NAME)) {
+            try {
+                LOG.ok("executeQuery: {0}, options: {1}", query, operationOptions);
+                // find by org name
+                if (query != null && query.byName != null) {
+
+                    List results = findOrg(query.byName, true);
+
+                    if (results != null && results.size() > 0) {
+                        for (Object result : results) {
+                            ConnectorObject connectorObject = convertOrgToConnectorObject((org.openspml.message.SearchResult) result, null);
+                            handler.handle(connectorObject);
+                        }
+                    }
+
+                }else if (query != null && query.byId != null) {
+
+                    List results = findOrg(query.byId, false);
+
+                    if(results != null && results.size() > 0) {
+                        for (Object result : results) {
+                            ConnectorObject connectorObject = convertOrgToConnectorObject((org.openspml.message.SearchResult) result, null);
+                            handler.handle(connectorObject);
+                        }
+                    }
+
+                } else {
+                    SearchRequest req = new SearchRequest();
+                    req.addCondition("objectclass", ORG_OBJECT_CLASS_READ);
+                    SearchResponse response = this.client.searchRequest(req);
+                    client.throwErrors(response);
+                    List results = response.getResults();
+                    int count = 0;
+                    if(results != null && results.size() > 0) {
+                        Map<String, String> parentId2Name = getParentId2Name(results);
+                        for (Object result : results) {
+                            if (++count % 100 == 0) {
+                                LOG.ok("executeQuery: processing {0}. of {1} orgs", count, results.size());
+                            }
+                            ConnectorObject connectorObject = convertOrgToConnectorObject((org.openspml.message.SearchResult) result, parentId2Name);
+                            boolean finish = !handler.handle(connectorObject);
+                            if (finish)
+                                break;
+                        }
+                    }
+                }
+
+            } catch (SpmlException e) {
+                throw new ConnectorIOException(e.getMessage(), e);
+            }
         } else {
             throw new UnsupportedOperationException("Unsupported object class " + objectClass);
         }
+    }
+
+    private Map<String, String> getParentId2Name(List results) {
+        Map<String, String> ret = new HashMap<String, String>();
+        if (configuration.getLookupParentName()) {
+            int count = 0;
+            for (Object result : results) {
+                if (++count % 100 == 0) {
+                    LOG.ok("executeQuery: processing {0}. of {1} orgs - getParentId2Name", count, results.size());
+                }
+                org.openspml.message.SearchResult res = (org.openspml.message.SearchResult) result;
+                String id = getAttribute(res, ATTR_ORG_ID, String.class);
+                String name = getAttribute(res, ATTR_ORG_DISPLAY_NAME, String.class);
+
+                ret.put(id, name);
+            }
+        }
+
+        return ret;
+    }
+
+    private List findOrg(String id, boolean byName) throws SpmlException {
+        SearchRequest req = new SearchRequest();
+
+        FilterTerm ftoc = new FilterTerm();
+        ftoc.setOperation(FilterTerm.OP_EQUAL);
+        ftoc.setName("objectclass");
+        ftoc.setValue(ORG_OBJECT_CLASS_READ);
+
+
+        FilterTerm ftid = new FilterTerm();
+        ftid.setOperation(FilterTerm.OP_EQUAL);
+        String filter = byName ? ATTR_ORG_DISPLAY_NAME : ATTR_ORG_ID;
+        ftid.setName(filter);
+        ftid.setValue(id);
+
+        FilterTerm ftand = new FilterTerm();
+        ftand.setOperation(FilterTerm.OP_AND);
+
+        ftand.addOperand(ftoc);
+        ftand.addOperand(ftid);
+
+        req.addFilterTerm(ftand);
+
+        SearchResponse response = client.searchRequest(req);
+        client.throwErrors(response);
+        return response.getResults();
     }
 
     private List findAccount(String id, boolean byAccountId) throws SpmlException {
@@ -232,12 +361,12 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
         ftid.setName(filter);
         ftid.setValue(id);
 
-        FilterTerm and = new FilterTerm();
-        and.setOperation(FilterTerm.OP_AND);
-        and.addOperand(ftoc);
-        and.addOperand(ftid);
+        FilterTerm ftand = new FilterTerm();
+        ftand.setOperation(FilterTerm.OP_AND);
+        ftand.addOperand(ftoc);
+        ftand.addOperand(ftid);
 
-        req.addFilterTerm(and);
+        req.addFilterTerm(ftand);
 
         SearchResponse response = this.client.searchRequest(req);
         client.throwErrors(response);
@@ -263,7 +392,48 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
             LOG.warn("Exception when finding existing account: "+uid, e);
             throw e;
         }
+    }
 
+    private String findOrgName(String id) throws SpmlException {
+        LOG.info("looking for org name for ID: "+id);
+        try {
+            List results = findOrg(id, false);
+            if(results == null || results.size() == 0) {
+                throw new UnknownUidException("Org " + id + " not exists");
+            }
+            else if (results.size() == 1){
+                SearchResult res = (SearchResult) results.get(0);
+//                return res.getIdentifierString();
+                return getAttribute(res, ATTR_ORG_DISPLAY_NAME, String.class);
+            }
+            else {
+                throw new ConnectorIOException("too many org on target resource with ID "+id+", expected 1, get "+results.size()+", results: "+results);
+            }
+        } catch (SpmlException e) {
+            LOG.warn("Exception when finding existing Org: "+id, e);
+            throw e;
+        }
+    }
+
+    private String findOrgId(String name) throws SpmlException {
+        LOG.info("looking for org ID for name: "+name);
+        try {
+            List results = findOrg(name, true);
+            if(results == null || results.size() == 0) {
+                throw new UnknownUidException("Org " + name + " not exists");
+            }
+            else if (results.size() == 1){
+                SearchResult res = (SearchResult) results.get(0);
+//                return res.getIdentifierString();
+                return getAttribute(res, ATTR_ORG_ID, String.class);
+            }
+            else {
+                throw new ConnectorIOException("too many org on target resource with name "+name+", expected 1, get "+results.size()+", results: "+results);
+            }
+        } catch (SpmlException e) {
+            LOG.warn("Exception when finding existing Org: "+name, e);
+            throw e;
+        }
     }
 
     private void addRequestAttributes(SearchRequest req) {
@@ -303,6 +473,42 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
         ConnectorObject connectorObject = builder.build();
         LOG.ok("convertAccountToConnectorObject, account: {0}, disabled: {1}, locked: {2}, \n\tconnectorObject: {3}",
                 result.getIdentifierString(), disabled, locked, connectorObject);
+        return connectorObject;
+
+    }
+
+    private ConnectorObject convertOrgToConnectorObject(org.openspml.message.SearchResult result, Map<String, String> parentId2Name) throws SpmlException {
+        ConnectorObjectBuilder builder = new ConnectorObjectBuilder();
+        ObjectClass objectClass = new ObjectClass(ORGANIZATION_NAME);
+        builder.setObjectClass(objectClass);
+
+        builder.setUid(getAttribute(result, ATTR_ORG_ID, String.class));
+        builder.setName(getAttribute(result, ATTR_ORG_DISPLAY_NAME, String.class));
+
+        String parentId = getAttribute(result, ATTR_ORG_MEMBER_OBJECT_GROUP, String.class);
+        if (parentId != null) {
+            addAttr(builder, ATTR_ORG_PARENT_ID, parentId);
+            if (configuration.getLookupParentName()) {
+                String parentName = null;
+                if (parentId2Name == null) {
+                    parentName = findOrgName(parentId);
+                }
+                else {
+                    parentName = parentId2Name.get(parentId);
+                    if (parentName == null) {
+                        // hmm, but why?
+                        parentName = findOrgName(parentId);
+                    }
+                }
+                if (parentName != null) {
+                    addAttr(builder, ATTR_ORG_PARENT_NAME, parentId);
+                }
+            }
+        }
+
+        ConnectorObject connectorObject = builder.build();
+        LOG.ok("convertAccountToConnectorObject, org: {0}, \n\tconnectorObject: {1}",
+                result.getIdentifierString(), connectorObject);
         return connectorObject;
 
     }
@@ -410,6 +616,8 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
     public Uid create(ObjectClass objectClass, Set<org.identityconnectors.framework.common.objects.Attribute> attributes, OperationOptions operationOptions) {
         if (objectClass.is(ObjectClass.ACCOUNT_NAME)) {    // __ACCOUNT__
             return createAccount(attributes);
+        } else if (objectClass.is(ORGANIZATION_NAME)) {    // Organization -> CustomOrgObjectClass
+            return createOrganization(attributes);
         } else {
             throw new UnsupportedOperationException("Unsupported object class " + objectClass);
         }
@@ -479,6 +687,65 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
 
             LOG.ok("New account created, id: {0}, Uid: {1}", id, uid);
 
+            return new Uid(uid);
+        } catch (SpmlException e) {
+            throw new ConnectorIOException(e.getMessage(), e);
+        }
+    }
+
+    private Uid createOrganization(Set<org.identityconnectors.framework.common.objects.Attribute> attributes) {
+        LOG.ok("createOrganization attributes: {0}", attributes);
+        String id = getAttr(attributes, Name.NAME, String.class, null);
+        if (StringUtil.isBlank(id)) {
+            throw new InvalidAttributeValueException("Missing mandatory attribute " + Name.NAME);
+        }
+        try {
+            List exists = findOrg(id, true);
+            if (exists != null && exists.size()>0) {
+                if (exists.size()>1) {
+                    AlreadyExistsException aee = new AlreadyExistsException("!!! can't create new org "+id+", " +
+                            "number of existing orgs with same name: "+exists.size() +
+                            ". To working consistently, we need unique org names globaly " +
+                        "(midPoint requirements), not only in the chosen parent organization (Sun IDM requirements). " +
+                        "Please update SunIDM organization structure to support midpoint requirement. !!! ");
+                    LOG.error(aee, aee.getMessage());
+                    throw aee;
+                }
+                else {
+                    throw new AlreadyExistsException("org "+id+" already exists");
+                }
+            }
+
+            String parentName = getAttr(attributes, ATTR_ORG_PARENT_NAME, String.class, null);
+            String parentId = getAttr(attributes, ATTR_ORG_PARENT_ID, String.class, null);
+            if (parentName == null && parentId != null) {
+                parentName = findOrgName(parentId);
+            }
+
+            Map spmlAtts = new HashMap();
+            spmlAtts.put(ATTR_ORG_DISPLAY_NAME, id);
+            if (!StringUtil.isBlank(parentName)) {
+                spmlAtts.put(ATTR_ORG_PARENT_NAME, parentName);
+            }
+            AddRequest req = new AddRequest();
+            req.setIdentifier(id);
+            req.setAttributes(spmlAtts);
+
+            req.setObjectClass(ORG_OBJECT_CLASS_WRITE);
+
+            SpmlResponse response = client.request(req);
+            client.throwErrors(response);
+
+            // read uid
+            String uid = null;
+            List results = findOrg(id, true);
+            if(results != null && results.size() == 1) {
+                uid = getAttribute((SearchResult)results.get(0), ATTR_ID, String.class);
+            } else {
+                throw new ConnectorIOException("can't find UID for new org "+id+", results: "+results);
+            }
+
+            LOG.ok("New org created, id: {0}, Uid: {1}", id, uid);
             return new Uid(uid);
         } catch (SpmlException e) {
             throw new ConnectorIOException(e.getMessage(), e);
@@ -611,6 +878,30 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
                     throw new ConnectorIOException(e.getMessage(), e);
                 }
             }
+        } else if (objectClass.is(ORGANIZATION_NAME)) {
+            try {
+                LOG.ok("delete org, Uid: {0}", uid);
+
+                DeleteRequest req = new DeleteRequest();
+                req.setIdentifier(ORG_OBJECT_CLASS_DELETE + ":" + uid.getUidValue());
+                SpmlResponse response = client.request(req);
+                client.throwErrors(response);
+
+            } catch (SpmlException e) {
+                if (e.toString().contains("Invalid type")) {
+                    LOG.error(e, "Exception when deleting org with UID "+uid.getUidValue()+": "+e);
+                    throw new UnknownUidException("Org with UID "+uid.getUidValue()+" not exists: "+e, e);
+                } else if (e.toString().contains("already locked by")) {
+                    LOG.error(e, "Exception when deleting org with UID "+uid.getUidValue()+": "+e);
+                    // TODO: or RetryableException? but this is only for create & update by javadoc
+                    throw new PermissionDeniedException("Org with UID "+uid.getUidValue()+" is locked, try again later (after 5 minutes): "+e, e);
+                    // TODO: org is locked by GUI, unlock it and try delete again - but no unlockOrg operation exists
+                }
+                else {
+                    throw new ConnectorIOException(e.getMessage(), e);
+                }
+            }
+
         } else {
             throw new UnsupportedOperationException("Unsupported object class " + objectClass);
         }
@@ -628,6 +919,8 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
     public Uid update(ObjectClass objectClass, Uid uid, Set<org.identityconnectors.framework.common.objects.Attribute> attributes, OperationOptions operationOptions) {
         if (objectClass.is(ObjectClass.ACCOUNT_NAME)) {
             return updateAccount(uid, attributes);
+        } else if (objectClass.is(ORGANIZATION_NAME)) {
+            return updateOrganization(uid, attributes);
         } else {
             throw new UnsupportedOperationException("Unsupported object class " + objectClass);
         }
@@ -713,4 +1006,49 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
         handleDisabledLocked(attributes, accountId);
     }
 
+    private Uid updateOrganization(Uid uid, Set<org.identityconnectors.framework.common.objects.Attribute> attributes) {
+        LOG.ok("updateOrganization, Uid: {0}, attributes: {1}", uid, attributes);
+        if (attributes == null || attributes.isEmpty()) {
+            LOG.ok("update ignored, nothing changed");
+            return uid;
+        }
+
+        try {
+
+            ModifyRequest req = new ModifyRequest();
+            req.setIdentifier(ORG_OBJECT_CLASS_WRITE + ":" +uid.getUidValue());
+            Map modifications = new HashMap();
+            modifications.put("userForm", "Tabbed User Form"); // TODO: realy need?
+
+            String displayName = getAttr(attributes, ATTR_ORG_DISPLAY_NAME, String.class, null);
+            String parentName = getAttr(attributes, ATTR_ORG_PARENT_NAME, String.class, null);
+            String parentId = getAttr(attributes, ATTR_ORG_PARENT_ID, String.class, null);
+            if (parentId == null && parentName != null) {
+                parentId = findOrgId(parentName);
+            }
+
+            Map spmlAtts = new HashMap();
+            // FIXME: actually not working :(((
+            if (!StringUtil.isBlank(displayName)) {
+                spmlAtts.put(ATTR_ORG_DISPLAY_NAME, displayName);
+            }
+            if (!StringUtil.isBlank(parentId)) {
+                spmlAtts.put(ATTR_ORG_PARENT_NAME, parentId); // yes need ID, not name in SunIDM, but why?
+            }
+
+            req.setModifications(modifications);
+            SpmlResponse response = client.request(req);
+            client.throwErrors(response);
+        } catch (SpmlException e) {
+            if (e.toString().contains("Invalid type")) {
+                LOG.error(e, "Exception when updating org with UID "+uid.getUidValue()+": "+e);
+                throw new UnknownUidException("Org with UID "+uid.getUidValue()+" not exists: "+e, e);
+            } else {
+                LOG.error(e, "Update failed for UID " + uid.getUidValue() + ", " + e);
+                throw new ConnectorIOException(e.getMessage(), e);
+            }
+        }
+
+        return uid;
+    }
 }

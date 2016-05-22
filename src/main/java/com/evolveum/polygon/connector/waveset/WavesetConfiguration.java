@@ -46,6 +46,8 @@ public class WavesetConfiguration extends AbstractConfiguration {
 
     private Boolean traceSpml = false;
 
+    private Boolean lookupParentName = false;
+
     private String ATTRIBUTES_DELIMITER = ":";
     private String[] attributes;
 
@@ -174,6 +176,16 @@ public class WavesetConfiguration extends AbstractConfiguration {
             return null;
         }
         return sb.toString();
+    }
+
+    @ConfigurationProperty(displayMessageKey = "waveset.config.lookupParentName",
+            helpMessageKey = "sunidm.config.lookupParentName.help")
+    public Boolean getLookupParentName() {
+        return lookupParentName;
+    }
+
+    public void setLookupParentName(Boolean lookupParentName) {
+        this.lookupParentName = lookupParentName;
     }
 
     @ConfigurationProperty(displayMessageKey = "waveset.config.traceSpml",

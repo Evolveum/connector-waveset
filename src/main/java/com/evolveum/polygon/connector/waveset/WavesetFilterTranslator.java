@@ -26,7 +26,7 @@ public class WavesetFilterTranslator extends AbstractFilterTranslator<WavesetFil
         if (Name.NAME.equals(attr.getName())) {
             if (attr.getValue() != null && attr.getValue().get(0) != null) {
                 WavesetFilter lf = new WavesetFilter();
-                lf.byAccountId = String.valueOf(attr.getValue().get(0));
+                lf.byName = String.valueOf(attr.getValue().get(0));
                 return lf;
             }
         } else if (Uid.NAME.equals(attr.getName())) {

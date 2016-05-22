@@ -5,14 +5,14 @@ package com.evolveum.polygon.connector.waveset;
  */
 public class WavesetFilter {
 
-    public String byAccountId;
+    public String byName;
 
     public String byId;
 
     @Override
     public String toString() {
         return "WavesetFilter{" +
-                "byAccountId='" + byAccountId + '\'' +
+                "byName='" + byName + '\'' +
                 "byId='" + byId + '\'' +
                 '}';
     }
