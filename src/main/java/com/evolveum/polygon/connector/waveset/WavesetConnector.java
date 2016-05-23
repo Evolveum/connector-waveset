@@ -501,7 +501,7 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
                     }
                 }
                 if (parentName != null) {
-                    addAttr(builder, ATTR_ORG_PARENT_NAME, parentId);
+                    addAttr(builder, ATTR_ORG_PARENT_NAME, parentName);
                 }
             }
         }
@@ -1017,8 +1017,6 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
 
             ModifyRequest req = new ModifyRequest();
             req.setIdentifier(ORG_OBJECT_CLASS_WRITE + ":" +uid.getUidValue());
-            Map modifications = new HashMap();
-            modifications.put("userForm", "Tabbed User Form"); // TODO: realy need?
 
             String displayName = getAttr(attributes, ATTR_ORG_DISPLAY_NAME, String.class, null);
             String parentName = getAttr(attributes, ATTR_ORG_PARENT_NAME, String.class, null);
@@ -1036,7 +1034,7 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
                 spmlAtts.put(ATTR_ORG_PARENT_NAME, parentId); // yes need ID, not name in SunIDM, but why?
             }
 
-            req.setModifications(modifications);
+            req.setModifications(spmlAtts);
             SpmlResponse response = client.request(req);
             client.throwErrors(response);
         } catch (SpmlException e) {
