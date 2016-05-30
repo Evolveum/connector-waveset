@@ -374,7 +374,7 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
         return response.getResults();
     }
 
-    private String findAccountId(Uid uid) throws SpmlException {
+    private SearchResult findAccount(Uid uid) throws SpmlException {
         try {
             List results = findAccount(uid.getUidValue(), false);
             if(results == null || results.size() == 0) {
@@ -382,8 +382,8 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
             }
             else if (results.size() == 1){
                 SearchResult res = (SearchResult) results.get(0);
-//                return res.getIdentifierString();
-                return getAttribute(res, ATTR_ACCOUNT_ID, String.class);
+
+                return res;
             }
             else {
                 throw new ConnectorIOException("too many accouts on target resource with UID "+uid.getUidValue()+", expected 1, get "+results.size()+", results: "+results);
@@ -630,7 +630,7 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
             throw new InvalidAttributeValueException("Missing mandatory attribute " + Name.NAME);
         }
 
-        Map spmlAttributes = prepareSpmlAttributes(attributes);
+        Map spmlAttributes = prepareSpmlAttributes(attributes, null);
 
         final List<String> passwordList = new ArrayList<String>(1);
         GuardedString guardedPassword = getAttr(attributes, OperationalAttributeInfos.PASSWORD.getName(), GuardedString.class);
@@ -647,7 +647,6 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
             password = passwordList.get(0);
         }
 
-        // TODO: really?
         if (StringUtil.isBlank(password)) {
             throw new InvalidAttributeValueException("Missing mandatory attribute " + OperationalAttributes.PASSWORD_NAME);
         }
@@ -669,8 +668,7 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
             req.setIdentifier(id);
             req.setObjectClass(configuration.getObjectClass());
             req.setAttributes(spmlAttributes);
-            SpmlResponse response = client.request(req);
-            client.throwErrors(response);
+            SpmlResponse response = callRequest(req);
 
             // read uid
             String uid = null;
@@ -733,8 +731,7 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
 
             req.setObjectClass(ORG_OBJECT_CLASS_WRITE);
 
-            SpmlResponse response = client.request(req);
-            client.throwErrors(response);
+            SpmlResponse response = callRequest(req);
 
             // read uid
             String uid = null;
@@ -752,10 +749,13 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
         }
     }
 
-    private Map prepareSpmlAttributes(Set<org.identityconnectors.framework.common.objects.Attribute> attributes) {
+    private Map prepareSpmlAttributes(Set<org.identityconnectors.framework.common.objects.Attribute> attributes, SearchResult original) {
         Map ret = new HashMap();
+        List<String> updatedAttributes = new LinkedList<String>();
+
         for (org.identityconnectors.framework.common.objects.Attribute attribute : attributes) {
             String name = attribute.getName();
+            updatedAttributes.add(name);
             if (ATTR_ACCOUNT_ID.equals(name)) {
                 throw new PermissionDeniedException("Rename account operation is not supported yet");
             }
@@ -781,6 +781,17 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
             }
 
             ret.put(name, value);
+        }
+
+        if (original != null) {
+            for (String originalAttribute : configuration.getAttributeNames()) {
+                if (!updatedAttributes.contains(originalAttribute)) {
+                    Object value = getAttribute(original, originalAttribute, configuration.getAttributeType(originalAttribute));
+                    if (value!=null) {
+                        ret.put(originalAttribute, value);
+                    }
+                }
+            }
         }
 
         return ret;
@@ -824,8 +835,7 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
 
             req.setAttribute(ATTR_ACCOUNT_ID, accountId);
 
-            SpmlResponse response = client.request(req);
-            client.throwErrors(response);
+            SpmlResponse response = callRequest(req);
             LOG.info("called operation "+operation+" for "+accountId);
         }
 
@@ -841,8 +851,7 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
 
         req.setAttribute(ATTR_ACCOUNT_ID, accountId);
 
-        SpmlResponse response = client.request(req);
-        client.throwErrors(response);
+        SpmlResponse response = callRequest(req);
         LOG.info("called operation "+operation+" for "+accountId);
     }
 
@@ -854,29 +863,21 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
                 LOG.ok("delete account, Uid: {0}", uid);
 
                 // check if exists & read his accountId - NAME
-                accountId = findAccountId(uid);
+                SearchResult res = findAccount(uid);
+                accountId = getAttribute(res, ATTR_ACCOUNT_ID, String.class);
 
                 // delete it
                 deleteAccount(accountId);
-
-            } catch (SpmlException e) {
-                if (e.toString().contains("Invalid type")) {
-                    LOG.error(e, "Exception when deleting account with id "+accountId+", UID "+uid.getUidValue()+", "+e);
-                    throw new UnknownUidException("Account id "+accountId+", UID "+uid.getUidValue()+", not exists", e);
-                } else if (e.toString().contains("already locked by")) {
-                    // account is locked by GUI, unlock it and try delete again
-                    try {
-                        LOG.warn(e, "Account is locked, trying to unlock and delete again with id " + accountId + ", UID " + uid.getUidValue() + ", " + e);
-                        unlockAccount(accountId);
-                        deleteAccount(accountId);
-                    } catch (SpmlException e1) {
-                        LOG.error(e, "Delete again failed with id " + accountId + ", UID " + uid.getUidValue() + ", " + e);
-                        throw new ConnectorIOException(e1.getMessage(), e1);
-                    }
-                }
-                else {
+            } catch (RetryableException re) {
+                LOG.warn(re, "Account is locked, trying to unlock and delete again with id " + accountId + ", UID " + uid.getUidValue() + ", " + re);
+                try {
+                    unlockAccount(accountId);
+                    deleteAccount(accountId);
+                } catch (SpmlException e) {
                     throw new ConnectorIOException(e.getMessage(), e);
                 }
+            } catch (SpmlException e) {
+                throw new ConnectorIOException(e.getMessage(), e);
             }
         } else if (objectClass.is(ORGANIZATION_NAME)) {
             try {
@@ -884,18 +885,12 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
 
                 DeleteRequest req = new DeleteRequest();
                 req.setIdentifier(ORG_OBJECT_CLASS_DELETE + ":" + uid.getUidValue());
-                SpmlResponse response = client.request(req);
-                client.throwErrors(response);
+                callRequest(req);
 
             } catch (SpmlException e) {
-                if (e.toString().contains("Invalid type")) {
+                if (e.toString().contains("noSuchIdentifier")) {
                     LOG.error(e, "Exception when deleting org with UID "+uid.getUidValue()+": "+e);
                     throw new UnknownUidException("Org with UID "+uid.getUidValue()+" not exists: "+e, e);
-                } else if (e.toString().contains("already locked by")) {
-                    LOG.error(e, "Exception when deleting org with UID "+uid.getUidValue()+": "+e);
-                    // TODO: or RetryableException? but this is only for create & update by javadoc
-                    throw new PermissionDeniedException("Org with UID "+uid.getUidValue()+" is locked, try again later (after 5 minutes): "+e, e);
-                    // TODO: org is locked by GUI, unlock it and try delete again - but no unlockOrg operation exists
                 }
                 else {
                     throw new ConnectorIOException(e.getMessage(), e);
@@ -911,8 +906,7 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
     private void deleteAccount(String accountId) throws SpmlException {
         DeleteRequest req = new DeleteRequest();
         req.setIdentifier(accountId);
-        SpmlResponse response = client.request(req);
-        client.throwErrors(response);
+        callRequest(req);
     }
 
     @Override
@@ -936,34 +930,31 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
         }
 
         String accountId = null;
+        SearchResult res = null;
         try {
 
-            accountId = findAccountId(uid);
+            res = findAccount(uid);
+            accountId = getAttribute(res, ATTR_ACCOUNT_ID, String.class);
 
-            updateAccount(accountId, attributes);
+            updateAccount(accountId, attributes, res);
 
-        } catch (SpmlException e) {
-            if (e.toString().contains("Invalid type")) {
-                LOG.error(e, "Exception when updatin account with id "+accountId+", UID "+uid.getUidValue()+", "+e);
-                throw new UnknownUidException("Account id "+accountId+", UID "+uid.getUidValue()+", not exists", e);
-            } else if (e.toString().contains("already locked by")) {
-                // account is locked by GUI, unlock it and try update again
-                try {
-                    LOG.warn(e, "Account is locked, trying to unlock and update again with id " + accountId + ", UID " + uid.getUidValue() + ", " + e);
-                    unlockAccount(accountId);
-                    updateAccount(accountId, attributes);
-                } catch (SpmlException e1) {
-                    LOG.error(e, "Update again failed with id " + accountId + ", UID " + uid.getUidValue() + ", " + e);
-                    throw new ConnectorIOException(e1.getMessage(), e1);
-                }
+        } catch (RetryableException re) {
+            LOG.warn(re, "Account is locked, trying to unlock and update again with id " + accountId + ", UID " + uid.getUidValue() + ", " + re);
+            try {
+                unlockAccount(accountId);
+                updateAccount(accountId, attributes, res);
+            } catch (SpmlException e) {
+                throw new ConnectorIOException(e.getMessage(), e);
             }
+        } catch (SpmlException e) {
+            throw new ConnectorIOException(e.getMessage(), e);
         }
 
         return uid;
     }
 
-    private void updateAccount(String accountId, Set<org.identityconnectors.framework.common.objects.Attribute> attributes) throws SpmlException {
-        Map modifications = prepareSpmlAttributes(attributes);
+    private void updateAccount(String accountId, Set<org.identityconnectors.framework.common.objects.Attribute> attributes, SearchResult original) throws SpmlException {
+        Map modifications = prepareSpmlAttributes(attributes, original);
 
         // update account
         if (modifications == null || modifications.isEmpty()) {
@@ -974,8 +965,7 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
             ModifyRequest req = new ModifyRequest();
             req.setIdentifier(accountId);
             req.setModifications(modifications);
-            SpmlResponse response = client.request(req);
-            client.throwErrors(response);
+            SpmlResponse response = callRequest(req);
         }
 
         // update password if needed
@@ -998,8 +988,7 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
             changePassReq.setOperationIdentifier("changeUserPassword");
             changePassReq.setAttribute("accountId", accountId);
             changePassReq.setAttribute(ATTR_PASSWORD, password);
-            SpmlResponse changePassResp = client.request(changePassReq);
-            client.throwErrors(changePassResp);
+            SpmlResponse changePassResp = callRequest(changePassReq);
         }
 
         // enable/disable & unlock
@@ -1018,7 +1007,7 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
             ModifyRequest req = new ModifyRequest();
             req.setIdentifier(ORG_OBJECT_CLASS_WRITE + ":" +uid.getUidValue());
 
-            String displayName = getAttr(attributes, ATTR_ORG_DISPLAY_NAME, String.class, null);
+            String displayName = getAttr(attributes, Name.NAME, String.class, null);
             String parentName = getAttr(attributes, ATTR_ORG_PARENT_NAME, String.class, null);
             String parentId = getAttr(attributes, ATTR_ORG_PARENT_ID, String.class, null);
             if (parentId == null && parentName != null) {
@@ -1026,19 +1015,19 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
             }
 
             Map spmlAtts = new HashMap();
-            // FIXME: actually not working :(((
             if (!StringUtil.isBlank(displayName)) {
-                spmlAtts.put(ATTR_ORG_DISPLAY_NAME, displayName);
+                throw new PermissionDeniedException("Rename org operation is not supported yet");
+                // FIXME: actually not working :(((
+//                spmlAtts.put(ATTR_ORG_DISPLAY_NAME, displayName);
             }
             if (!StringUtil.isBlank(parentId)) {
                 spmlAtts.put(ATTR_ORG_PARENT_NAME, parentId); // yes need ID, not name in SunIDM, but why?
             }
 
             req.setModifications(spmlAtts);
-            SpmlResponse response = client.request(req);
-            client.throwErrors(response);
+            SpmlResponse response = callRequest(req);
         } catch (SpmlException e) {
-            if (e.toString().contains("Invalid type")) {
+            if (e.toString().contains("ItemNotFound")) {
                 LOG.error(e, "Exception when updating org with UID "+uid.getUidValue()+": "+e);
                 throw new UnknownUidException("Org with UID "+uid.getUidValue()+" not exists: "+e, e);
             } else {
@@ -1048,5 +1037,38 @@ public class WavesetConnector implements Connector, TestOp, SchemaOp, SearchOp<W
         }
 
         return uid;
+    }
+
+    SpmlResponse callRequest(SpmlRequest request) throws SpmlException, RetryableException {
+        SpmlResponse response = null;
+        try {
+            response = client.request(request);
+            client.throwErrors(response);
+        }
+        catch (SpmlException e) {
+            if (e.toString().contains("LockedByAnother")) {
+                throw RetryableException.wrap("object already locked, please try again later: "+e, e);
+            } else if (e.toString().contains("WSCredentialsTimeoutException")) {
+                LOG.warn(e, "Error occured, trying to relogin: "+e);
+                // relogin
+                this.client.setUser(this.configuration.getUsername()); // to set _token to null
+                this.client.login();
+                // re run request
+                try {
+                    response = client.request(request);
+                    client.throwErrors(response);
+                } catch (SpmlException e2) {
+                    if (e.toString().contains("LockedByAnother")) {
+                        throw RetryableException.wrap("object already locked, please try again later: " + e2, e2);
+                    } else {
+                        throw e2;
+                    }
+                }
+            } else {
+                throw e;
+            }
+        }
+
+        return response;
     }
 }
