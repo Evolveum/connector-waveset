@@ -1,2 +1,3 @@
-# connector-waveset
-ConnId/Polygon connector for Oracle Waveset (Sun Identity Manager)
+# ConnId connector for Oracle Waveset (Sun Identity Manager)
+
+Functionality of this connector is still limited.
